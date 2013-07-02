@@ -1,0 +1,21 @@
+{
+    "name": "codemix/handlebarsphp",
+    "description": "Transpiles handlebars templates into native PHP templates.",
+    "keywords": ["handlebars", "template", "templates"],
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Charles Pick",
+            "email": "charles@codemix.com",
+            "homepage": "http://codemix.com/"
+        }
+    ],
+    "autoload": {
+        "psr-0": {
+            "Handlebars": "src/"
+        }
+    },
+    "require": {
+        "php": ">=5.3.0"
+    }
+}
