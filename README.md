@@ -1,5 +1,7 @@
 # HandlebarsPHP
 
+### Note: this is alpha quality software, use at your own risk.
+
 Turns handlebars templates into executable PHP code ahead of time, ships with built in support for Yii 1.x.
 but allows customisation of output to support different frameworks.
 
