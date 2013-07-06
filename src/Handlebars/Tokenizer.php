@@ -32,300 +32,357 @@ class Tokenizer
     public function tokenize($input)
     {
         $tokens = array();
-        $remaining = $input;
-        while(is_array($chunk = $this->chomp($remaining))) {
-            list($head, $token, $remaining) = $chunk;
-            if (!empty($head))
-                $tokens[] = $head;
-            $tokens[] = $token;
+        while(mb_strlen($input) > 0) {
+            if (($result = $this->tokenizeContent($input)) !== false) {
+                list($token, $input) = $result;
+                $tokens[] = $token;
+            }
+            else if (($result = $this->tokenizeTag($input)) !== false) {
+                list($tok, $input) = $result;
+                foreach($tok as $token)
+                    $tokens[] = $token;
+            }
+            else
+                throw new \Exception('Invalid Input: '.$input);
         }
-        if (!is_array($chunk) && !empty($chunk))
-            $tokens[] = $chunk;
         return $tokens;
     }
 
     /**
-     * Consumes the first template tag in the given input.
-     * If no tag is found the input is returned directly.
+     * Tokenizes content and if successful returns a 2 element array
+     * containing the token and any remaining unparsed input. If unsuccessful
+     * returns false.
      *
-     * @param string $input the input
+     * @param string $input the input to tokenize
      *
-     * @return string|array the input if no match was found, otherwise a 3 element
-     * array containing the text before the token, the token itself and any remaining unparsed text.
+     * @return array|bool the array containing the token and remaining input or false if no match found.
      */
-    protected function chomp($input)
+    protected function tokenizeContent($input)
     {
-        if (!preg_match("/^(.*?)(\{\{(\{)?(((?!\}\}).)+)\}\}(\})?)(.*)$/msu", $input, $matches))
-            return $input;
-        $head = $matches[1];
-        $tail = $matches[7];
-        $tokenContent = $matches[4];
-        $parsed = $this->tokenizeTag($tokenContent);
-        if (!is_array($parsed)) {
-            // this is an invalid tag
-            $head .= $matches[2];
-            $remaining = $this->chomp($tail);
-            if (!is_array($remaining))
-                return $head.$remaining;
-            else
-                return array(
-                    $head.$remaining[0],
-                    $remaining[1],
-                    $remaining[2]
-                );
+        if (preg_match("/^(.*?)(\{\{)(.*)/mus", $input, $matches)) {
+            if (strlen($matches[1]) == 0)
+                return false;
+            $input = $matches[1];
+            $remaining = $matches[2].$matches[3];
         }
-        list($token, $remaining) = $parsed;
-        $token->raw = !empty($matches[3]) && !empty($matches[6]);
-
-        return array($head, $token, $tail);
+        else
+            $remaining = '';
+        return array(new Token(Token::CONTENT, $input), $remaining);
     }
 
     /**
-     * Tokenize the content of a template tag.
+     * Tokenizes a tag and if successful returns a 2 element array
+     * containing the token and any remaining unparsed input. If unsuccessful
+     * returns false.
      *
-     * @param string $input the input
+     * @param string $input the input to tokenize
      *
-     * @return string|array the input if no match was found, otherwise an
-     * array containing the token and any remaining text.
+     * @return array|bool the array containing the token and remaining input or false if no match found.
      */
     protected function tokenizeTag($input)
     {
-        $types = array(
-            '#' => 'startBlock',
-            '/' => 'endBlock',
-            '@' => 'reference',
-            '>' => 'partial',
-            '!' => 'comment',
-        );
-        if (preg_match("/^(!|#|\/|\@|>)?(.*)/msu", $input, $matches)) {
-            if (!empty($matches[1]))
-                $type = $types[$matches[1]];
-            else
-                $type = 'expression';
-            if ($type === 'partial')
-                return $this->tokenizePartial(trim($matches[2]));
-            elseif ($type === 'comment') {
-                return $this->tokenizeComment($matches[2]);
-            }
-            $parsed = $this->tokenizeExpression($matches[2]);
-            if (!is_array($parsed))
-                return $input;
-            list($expression, $remaining) = $parsed;
-            $expression->type = $type;
-            return array($expression, $remaining);
-
+        if (($result = $this->tokenizeOpenTag($input)) === false)
+            return false;
+        list($open, $input) = $result;
+        if ($open->type === Token::OPEN_COMMENT) {
+            list($tokens, $input) = $this->tokenizeCommentBody($input);
+            array_unshift($tokens, $open);
+        }
+        else if (($result = $this->tokenizeTagBody($input)) !== false) {
+            list($tokens, $input) = $result;
+            array_unshift($tokens, $open);
         }
         else
-            return $input;
+            $tokens = array($open);
+        if (($result = $this->tokenizeCloseTag($input)) !== false) {
+            list($close, $input) = $result;
+            $tokens[] = $close;
+        }
+        else
+            $tokens[] = new Token(Token::INVALID);
+
+        return array($tokens, $input);
     }
 
     /**
-     * Tokenize an integer
+     * Tokenizes an open tag and if successful returns a 2 element array
+     * containing the token and any remaining unparsed input. If unsuccessful
+     * returns false.
      *
-     * @param string $input the input
+     * @param string $input the input to tokenize
      *
-     * @return string|array the input if no match was found, otherwise an
-     * array containing the token and any remaining text.
+     * @return array|bool the array containing the token and remaining input or false if no match found.
+     */
+    protected function tokenizeOpenTag($input)
+    {
+        if (!preg_match("/^(\{\{)([>|#|\/|^|&|!|{])?(.*)/mus", $input, $matches))
+            return false;
+        $token = new Token;
+        if (!empty($matches[2])) {
+            switch($matches[2]) {
+                case ">":
+                    $token->type = Token::OPEN_PARTIAL;
+                    break;
+                case "#":
+                    $token->type = Token::OPEN_BLOCK;
+                    break;
+                case "/";
+                    $token->type = Token::OPEN_END_BLOCK;
+                    break;
+                case "^":
+                    $token->type = Token::OPEN_INVERSE;
+                    break;
+                case "{";
+                    $token->type = Token::OPEN_UNESCAPED;
+                    break;
+                case "&";
+                    $token->type = Token::OPEN;
+                    break;
+                case "!";
+                    $token->type = Token::OPEN_COMMENT;
+                    break;
+            }
+        }
+        else
+            $token->type = Token::OPEN;
+        $token->value = $matches[1].$matches[2];
+        return array($token, $matches[3]);
+    }
+
+    /**
+     * Tokenizes an open tag and if successful returns a 2 element array
+     * containing the token and any remaining unparsed input. If unsuccessful
+     * returns false.
+     *
+     * @param string $input the input to tokenize
+     *
+     * @return array|bool the array containing the token and remaining input or false if no match found.
+     */
+    protected function tokenizeCloseTag($input)
+    {
+        if (!preg_match("/^\s*(\}\})(\})?(.*)/mus", $input, $matches))
+            return false;
+        if ($matches[2])
+            $token = new Token(Token::CLOSE_UNESCAPED, $matches[1].$matches[2]);
+        else
+            $token = new Token(Token::CLOSE, $matches[1]);
+        return array($token, $matches[3]);
+    }
+
+    /**
+     * Tokenizes the body of a comment and if successful returns a 2 element array
+     * containing the parsed tokens and any remaining unparsed input. If unsuccessful
+     * returns false.
+     *
+     * @param string $input the input to tokenize
+     *
+     * @return array|bool the array containing the tokens and remaining input or false if no match found.
+     */
+    protected function tokenizeCommentBody($input)
+    {
+        if (preg_match("/^--([^(--\}\})]*)(--)(\}\})(.*)/mus", $input, $matches)) {
+            $body = $matches[1];
+            $tail = $matches[3].$matches[4];
+        }
+        else if (preg_match("/^([^(\}\})]*)(\}\})(.*)/mus", $input, $matches)) {
+            $body = $matches[1];
+            $tail = $matches[2].$matches[3];
+        }
+        else {
+            $body = "";
+            $tail = $input;
+        }
+        return array(array(new Token(Token::COMMENT, $body)), $tail);
+    }
+
+    /**
+     * Tokenizes the body of a tag and if successful returns a 2 element array
+     * containing the parsed tokens and any remaining unparsed input. If unsuccessful
+     * returns false.
+     *
+     * @param string $input the input to tokenize
+     *
+     * @return array|bool the array containing the tokens and remaining input or false if no match found.
+     */
+    protected function tokenizeTagBody($input)
+    {
+        $input = trim($input);
+        $tokens = array();
+        while(mb_strlen($input) > 0) {
+            if (($result = $this->tokenizeEquals($input)) !== false) {
+                list($token, $input) = $result;
+                $tokens[] = $token;
+            }
+            else if (($result = $this->tokenizeData($input)) !== false) {
+                list($token, $input) = $result;
+                $tokens[] = $token;
+            }
+            else if (($result = $this->tokenizeInteger($input)) !== false) {
+                list($token, $input) = $result;
+                $tokens[] = $token;
+            }
+            else if (($result = $this->tokenizeString($input)) !== false) {
+                list($token, $input) = $result;
+                $tokens[] = $token;
+            }
+            else if (($result = $this->tokenizeBoolean($input)) !== false) {
+                list($token, $input) = $result;
+                $tokens[] = $token;
+            }
+            else if (($result = $this->tokenizeInverse($input)) !== false) {
+                list($token, $input) = $result;
+                $tokens[] = $token;
+            }
+            else if (($result = $this->tokenizeIdentifier($input)) !== false) {
+                list($token, $input) = $result;
+                $tokens[] = $token;
+            }
+            else if (($result = $this->tokenizeSeparator($input)) !== false) {
+                list($token, $input) = $result;
+                $tokens[] = $token;
+            }
+            else {
+                break;
+            }
+            $input = trim($input);
+        }
+        return array($tokens, $input);
+    }
+
+    /**
+     * Tokenizes an equals sign and if successful returns a 2 element array
+     * containing the token and any remaining unparsed input. If unsuccessful
+     * returns false.
+     *
+     * @param string $input the input to tokenize
+     *
+     * @return array|bool the array containing the token and remaining input or false if no match found.
+     */
+    protected function tokenizeEquals($input)
+    {
+        if (!preg_match("/^\s*(=)(.*)/mus", $input, $matches))
+            return false;
+        return array(new Token(Token::EQUALS, $matches[1]), $matches[2]);
+    }
+
+    /**
+     * Tokenizes an integer and if successful returns a 2 element array
+     * containing the token and any remaining unparsed input. If unsuccessful
+     * returns false.
+     *
+     * @param string $input the input to tokenize
+     *
+     * @return array|bool the array containing the token and remaining input or false if no match found.
      */
     protected function tokenizeInteger($input)
     {
-        if (!preg_match("/^(\.)?(\d+)(.*)/", $input, $matches))
-            return $input;
-        else
-            return array(
-                (object) array(
-                    'type' => 'integer',
-                    'value' => $matches[2]
-                ),
-                $matches[3]
-            );
+        if (!preg_match("/^\s*(\d+)(.*)/us", $input, $matches))
+            return false;
+        return array(new Token(Token::INTEGER, $matches[1]), $matches[2]);
     }
 
     /**
-     * Tokenize a string
+     * Tokenizes a string and if successful returns a 2 element array
+     * containing the token and any remaining unparsed input. If unsuccessful
+     * returns false.
      *
-     * @param string $input the input
+     * @param string $input the input to tokenize
      *
-     * @return string|array the input if no match was found, otherwise an
-     * array containing the token and any remaining text.
+     * @return array|bool the array containing the token and remaining input or false if no match found.
      */
     protected function tokenizeString($input)
     {
-        if (!preg_match("/^('|\")(.*?)(([^\\\])(\\1))(.*)/msu", $input, $matches))
-            return $input;
+        if (!preg_match("/^\s*('|\")(.*?)(([^\\\])(\\1))(.*)/us", $input, $matches))
+            return false;
+        return array(new Token(Token::STRING, $matches[2].$matches[4], array('delimiter' => $matches[1])), $matches[6]);
+    }
+
+    /**
+     * Tokenizes a boolean and if successful returns a 2 element array
+     * containing the token and any remaining unparsed input. If unsuccessful
+     * returns false.
+     *
+     * @param string $input the input to tokenize
+     *
+     * @return array|bool the array containing the token and remaining input or false if no match found.
+     */
+    protected function tokenizeBoolean($input)
+    {
+        if (!preg_match("/^\s*(true|false)(\s|\})(.*)/us", $input, $matches))
+            return false;
+        return array(new Token(Token::BOOLEAN, $matches[1]), $matches[2].$matches[3]);
+    }
+
+
+    /**
+     * Tokenizes an identifier and if successful returns a 2 element array
+     * containing the token and any remaining unparsed input. If unsuccessful
+     * returns false.
+     *
+     * @param string $input the input to tokenize
+     *
+     * @return array|bool the array containing the token and remaining input or false if no match found.
+     */
+    protected function tokenizeIdentifier($input)
+    {
+        if (preg_match("/^\s*(\.\.)(.*)/us", $input, $matches))
+            return array(new Token(Token::ID, $matches[1]), $matches[2]);
+        else if (preg_match("/^\s*(\.)(\}|\/|\s+)(.*)/us", $input, $matches))
+            return array(new Token(Token::ID, $matches[1]), $matches[2].$matches[3]);
+        elseif (preg_match("/^\s*\[([^\]]*)\](.*)/us", $input, $matches))
+            return array(new Token(Token::ID, $matches[1], array('quoted' => true)), $matches[2]);
+        else if (preg_match("/^\s*([^\!\s'\"#%\-\/;,\.;\->@\[\^`\{\~\}\]=]+)(.*)/us", $input, $matches))
+            return array(new Token(Token::ID, $matches[1]), $matches[2]);
         else
-            return array(
-                (object) array(
-                    'type' => 'string',
-                    'delimiter' => $matches[1],
-                    'value' => $matches[2].$matches[4],
-                ),
-                $matches[6]
-            );
+            return false;
     }
 
     /**
-     * Tokenize a parent accessor
+     * Tokenizes an inverse token and if successful returns a 2 element array
+     * containing the token and any remaining unparsed input. If unsuccessful
+     * returns false.
      *
-     * @param string $input the input
+     * @param string $input the input to tokenize
      *
-     * @return string|array the input if no match was found, otherwise an
-     * array containing the token and any remaining text.
+     * @return array|bool the array containing the token and remaining input or false if no match found.
      */
-    protected function tokenizeParentAccessor($input)
+    protected function tokenizeInverse($input)
     {
-        if (!preg_match("/^(\.\.\/)(.*)/msu", $input, $matches))
-            return $input;
-        $accessor = (object) array(
-            'type' => 'parentAccessor',
-            'name' => $matches[1],
-            'depth' => 1
-        );
-        $remaining = $matches[2];
-        while(preg_match("/^(\.\.\/)(.*)/msu", $remaining, $matches)) {
-            $accessor->depth++;
-            $remaining = $matches[2];
-        }
-        return array($accessor, $remaining);
-    }
-
-    /**
-     * Tokenize part of an identifier
-     *
-     * @param string $input the input
-     *
-     * @return string|array the input if no match was found, otherwise an
-     * array containing the token and any remaining text.
-     */
-    protected function tokenizeIdentifierPart($input)
-    {
-
-        if (preg_match("/^(\.)?([\$A-Z-a-z_][A-Za-z0-9_]*)(.*)/msu",$input, $matches))
-            return array(
-                (object) array(
-                    'type' => $matches[1] ? 'accessor' : 'identifier',
-                    'name' => $matches[2],
-                ),
-                $matches[3]
-            );
+        if (preg_match("/^\s*(else)\b(.*)/us", $input, $matches))
+            return array(new Token(Token::INVERSE, $matches[1]), $matches[2]);
         else
-            return $input;
+            return false;
     }
 
     /**
-     * Tokenize an accessor
+     * Tokenizes a data reference and if successful returns a 2 element array
+     * containing the token and any remaining unparsed input. If unsuccessful
+     * returns false.
      *
-     * @param string $input the input
+     * @param string $input the input to tokenize
      *
-     * @return string|array the input if no match was found, otherwise an
-     * array containing the token and any remaining text.
+     * @return array|bool the array containing the token and remaining input or false if no match found.
      */
-    protected function tokenizeAccessor($input)
+    protected function tokenizeData($input)
     {
-        if (!is_array($parsed = $this->tokenizeParentAccessor($input)) && !is_array($parsed = $this->tokenizeIdentifierPart($input)))
-            return $input;
-        list($identifier, $remaining) = $parsed;
-        $identifier->accessors = array();
-        while(is_array($parsed = $this->tokenizeIdentifierPart($remaining)) || is_array($parsed = $this->tokenizeInteger($remaining))) {
-            list($accessor, $remaining) = $parsed;
-            $identifier->accessors[] = $accessor;
-        }
-        return array($identifier, $remaining);
+        if (!preg_match("/^\s*(@)(.*)/mus", $input, $matches))
+            return false;
+        return array(new Token(Token::DATA, $matches[1]), $matches[2]);
     }
 
     /**
-     * Tokenize an expression
-     * @param string $input the input
+     * Tokenizes a separator and if successful returns a 2 element array
+     * containing the token and any remaining unparsed input. If unsuccessful
+     * returns false.
      *
-     * @return string|array the input if no match was found, otherwise an
-     * array containing the token and any remaining text.
-     */
-    protected function tokenizeExpression($input)
-    {
-        $parsed = $this->tokenizeAccessor($input);
-        if (!is_array($parsed))
-            return $input;
-        list($accessor, $remaining) = $parsed;
-        $expression = (object) array(
-            'type' => 'expression',
-            'subject' => $accessor,
-            'params' => array(),
-            'body' => array()
-        );
-        while (preg_match("/^\s+(.*)/mus", $remaining, $matches)) {
-            $remaining = $matches[1];
-            if (is_array($parsed = $this->tokenizeAccessor($remaining))) {
-                list($param, $remaining) = $parsed;
-                $expression->params[] = $param;
-            }
-            else if (is_array($parsed = $this->tokenizeInteger($remaining))) {
-                list($param, $remaining) = $parsed;
-                $expression->params[] = $param;
-            }
-            else if (is_array($parsed = $this->tokenizeString($remaining))) {
-                list($param, $remaining) = $parsed;
-                $expression->params[] = $param;
-            }
-            else
-                break;
-        }
-        return array($expression, $remaining);
-
-
-    }
-
-    /**
-     * Tokenize a partial call.
-     * @param string $input the input
+     * @param string $input the input to tokenize
      *
-     * @return string|array the input if no match was found, otherwise an
-     * array containing the token and any remaining text.
+     * @return array|bool the array containing the token and remaining input or false if no match found.
      */
-    protected function tokenizePartial($input)
+    protected function tokenizeSeparator($input)
     {
-        $remaining = trim($input);
-        $partial = (object) array(
-            'type' => 'partial',
-            'name' => null,
-            'context' => null,
-        );
-
-        if (is_array($parsed = $this->tokenizeString($remaining))) {
-            list($item, $remaining) = $parsed;
-            $partial->name = $item->value;
-        }
-        else if (is_array($parsed = $this->tokenizeIdentifierPart($remaining))) {
-            list($item, $remaining) = $parsed;
-            $partial->name = $item->name;
-        }
-        else
-            return $input;
-
-        $remaining = trim($remaining);
-        if (mb_strlen($remaining) && is_array($parsed = $this->tokenizeIdentifierPart($remaining))) {
-            list($item, $remaining) = $parsed;
-            $partial->context = $item;
-        }
-        return array($partial, $remaining);
+        if (!preg_match("/^\s*([\[\/\]\.])(.*)/mus", $input, $matches))
+            return false;
+        return array(new Token(Token::SEP, $matches[1]), $matches[2]);
     }
-
-
-    /**
-     * Tokenize a comment.
-     * @param string $input the comment to tokenize
-     *
-     * @return array the input if no match was found, otherwise an
-     * array containing the token and any remaining text.
-     */
-    protected function tokenizeComment($input)
-    {
-        return array(
-            (object) array(
-                'type' => 'comment',
-                'value' => $input
-            ),
-            ''
-        );
-    }
-
 }

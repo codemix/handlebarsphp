@@ -1,6 +1,12 @@
 <?php
 
 namespace Handlebars\Yii;
+use Handlebars\Exception;
+use Handlebars\Node\Block;
+use Handlebars\Node\Identifier;
+use Handlebars\Node\Literal;
+use Handlebars\Node\Partial;
+
 
 /**
  * Handlebars template code generator for Yii 1.x projects.
@@ -15,6 +21,11 @@ namespace Handlebars\Yii;
 class CodeGenerator extends \Handlebars\CodeGenerator
 {
     /**
+     * @var string the prefix used when access helpers
+     */
+    public $helperScopePrefix = '$this->viewHelper->';
+
+    /**
      * @inheritDoc
      */
     protected function wrapEncode($code)
@@ -25,31 +36,39 @@ class CodeGenerator extends \Handlebars\CodeGenerator
     /**
      * @inheritDoc
      */
-    protected function generatePartial($token)
+    protected function generatePartial(Partial $node)
     {
-        if ($token->context === null)
-            $context = '$'.$token->scopeName;
+        $out = '<?=$this->renderPartial(';
+        if ($node->name instanceof Literal)
+            $out .= $node->name->value;
+        else if ($node->name instanceof Identifier)
+            $out .= '"'.$node->name->getName().'"';
         else
-            $context = $this->generateIdentifier($token->context);
-        return "<?php \$this->renderPartial('{$token->name}', {$context}); ?>";
+            throw new Exception("Expected literal or id, got ".get_class($node));
+
+        if (!empty($node->context)) {
+            $out .= ', '.$this->generateNode($node->context);
+        }
+        else
+            $out .= ', array()';
+        $out .= ', true)?>';
+        return $out;
     }
 
     /**
-     * Generates the source code for a 'content' block.
-     * This turns into `$this->beginContent(..)` and `$this->endContent()` calls.
+     * Generates the code for an if block node.
      *
-     * @param object $token the token to generate code for
+     * @param Block $node the node to generate code for
      *
      * @return string the generated code
      */
-    protected function generateContentBlock($token)
+    protected function generateContentBlock(Block $node)
     {
         $out = array();
-        $params = array();
-        foreach($token->start->params as $param)
-            $params[] = $this->generateToken($param);
+        $params = array_map(array($this, "generateNode"), $node->params);
         $out[] = "<?php \$this->beginContent(".implode(', ', $params)."); ?>";
-        $out[] = $this->generate($token);
+        foreach($node->body as $child)
+            $out[] = $this->generateNode($child);
         $out[] = '<?php $this->endContent(); ?>';
         return implode('', $out);
     }

@@ -17,18 +17,406 @@ namespace Handlebars;
 class CodeGenerator
 {
     /**
+     * @var string the prefix used when access helpers
+     */
+    public $helperScopePrefix = '$this->helpers->';
+
+
+    /**
      * Generates executable code from the given Abstract Syntax Tree.
      *
-     * @param string $ast the ast to generate code from
+     * @param Frame $ast the ast to generate code from
      *
      * @return string the generated code
      */
-    public function generate($ast)
+    public function generate(Frame $ast)
     {
         $out = array();
-        foreach($ast->body as $token)
-            $out[] = $this->generateToken($token);
+        foreach($ast->children as $child) {
+            $out[] = $this->generateNode($child);
+        }
         return implode("", $out);
+    }
+
+    /**
+     * @param Node\Base|Frame $node
+     *
+     * @return string
+     */
+    protected function generateNode(Node\Base $node)
+    {
+        if ($node instanceof Frame)
+            return $this->generate($node);
+        else if ($node instanceof Node\Content) {
+            return $this->generateContent($node);
+        }
+        else if ($node instanceof Node\Comment) {
+            return $this->generateComment($node);
+        }
+        else if ($node instanceof Node\Block) {
+            return $this->generateBlock($node);
+        }
+        else if ($node instanceof Node\Partial) {
+            return $this->generatePartial($node);
+        }
+        else if ($node instanceof Node\Expression) {
+            return $this->generateExpression($node);
+        }
+        else if ($node instanceof Node\Identifier) {
+            return $this->generateIdentifier($node);
+        }
+        else if ($node instanceof Node\Hash) {
+            return $this->generateHash($node);
+        }
+        else if ($node instanceof Node\Literal) {
+            return $this->generateLiteral($node);
+        }
+        else
+            return get_class($node)."\n";
+    }
+
+    /**
+     * Generates the code for a content node.
+     *
+     * @param Node\Content $node the node to generate code for
+     *
+     * @return string the generated code
+     */
+    protected function generateContent(Node\Content $node)
+    {
+        return $node->value;
+    }
+
+    /**
+     * Generates the code for a comment node.
+     *
+     * @param Node\Comment $node the node to generate code for
+     *
+     * @return string the generated code
+     */
+    protected function generateComment(Node\Comment $node)
+    {
+        return '<?php /** '.$node->value.' */ ?>';
+    }
+
+    /**
+     * Generates the code for a block node.
+     *
+     * @param Node\Block $node the node to generate code for
+     *
+     * @return string the generated code
+     */
+    protected function generateBlock(Node\Block $node)
+    {
+        $name = $node->subject->getName();
+        $methodName = 'generate'.$name.'Block';
+        if (method_exists($this, $methodName))
+            return $this->{$methodName}($node);
+        else
+            return $this->generateBlockDefault($node);
+    }
+
+    /**
+     * Generates the code for a generic block node.
+     *
+     * @param Node\Block $node the node to generate code for
+     *
+     * @return string the generated code
+     */
+    protected function generateBlockDefault(Node\Block $node)
+    {
+        $out = array('<?php ob_start(); ?>');
+        if ($node->body instanceof Frame)
+            $body = $node->body->children;
+        else
+            $body = $node->body;
+        foreach($body as $child)
+            $out[] = $this->generateNode($child);
+
+        $name = $node->subject->getName();
+        $params = array_map(array($this, "generateNode"), $node->params);
+
+        if (!empty($node->inverse)) {
+
+            if ($node->inverse instanceof Frame)
+                $inverse = $node->inverse->children;
+            else
+                $inverse = $node->inverse;
+
+            if (count($inverse)) {
+                $tmpBodyName = $node->getFrame()->createTempVarName();
+                $out[] = '<?php '.$tmpBodyName.' = ob_get_clean(); ob_start(); ?>';
+
+                foreach($inverse as $child)
+                    $out[] = $this->generateNode($child);
+
+
+                array_unshift($params, 'array('.$tmpBodyName.', ob_get_clean())');
+            }
+            else
+                array_unshift($params, 'ob_get_clean()');
+        }
+        else
+            array_unshift($params, 'ob_get_clean()');
+        $out[] = '<?='.$this->helperScopePrefix.$name.'('.implode(', ', $params).')?>';
+        return implode('', $out);
+    }
+
+    /**
+     * Generates the code for an if block node.
+     *
+     * @param Node\Block $node the node to generate code for
+     *
+     * @return string the generated code
+     */
+    protected function generateIfBlock(Node\Block $node)
+    {
+        $out = array('<?php if (');
+        $params = array();
+        foreach(array_map(array($this, "generateNode"), $node->params) as $param)
+            $params[] = '!empty('.$param.')';
+
+        $out[] = implode(' && ', $params);
+        $out[] = '): ?>';
+        foreach($node->body as $child)
+            $out[] = $this->generateNode($child);
+        if ($node->inverse && count($node->inverse)) {
+            $out[] = '<?php else: ?>';
+            foreach($node->inverse as $child)
+                $out[] = $this->generateNode($child);
+        }
+        $out[] = '<?php endif; ?>';
+
+        return implode('', $out);
+    }
+
+
+    /**
+     * Generates the code for an unless block node.
+     *
+     * @param Node\Block $node the node to generate code for
+     *
+     * @return string the generated code
+     */
+    protected function generateUnlessBlock(Node\Block $node)
+    {
+        $out = array('<?php if (');
+        $params = array();
+        foreach(array_map(array($this, "generateNode"), $node->params) as $param)
+            $params[] = 'empty('.$param.')';
+
+        $out[] = implode(' || ', $params);
+        $out[] = '): ?>';
+        foreach($node->body as $child)
+            $out[] = $this->generateNode($child);
+        if ($node->inverse && count($node->inverse)) {
+            $out[] = '<?php else: ?>';
+            foreach($node->inverse as $child)
+                $out[] = $this->generateNode($child);
+        }
+        $out[] = '<?php endif; ?>';
+
+        return implode('', $out);
+    }
+
+    /**
+     * Generates the code for an each block node.
+     *
+     * @param Node\Block $node the node to generate code for
+     *
+     * @return string the generated code
+     */
+    protected function generateEachBlock(Node\Block $node)
+    {
+        $param = $this->generateNode($node->params[0]);
+        $body = $node->body;
+        $out = array(
+            '<?php if (!empty('.$param.')): foreach('.$param.' as $'.$body->getIteratorName().' => $'.$body->getName().'): ?>'
+        );
+        foreach($body->children as $child) {
+            $out[] = $this->generateNode($child);
+        }
+
+        $out[] = '<?php endforeach; endif; ?>';
+
+        return implode('', $out);
+    }
+
+    /**
+     * Generates the code for a partial node.
+     *
+     * @param Node\Partial $node the node to generate code for
+     *
+     * @throws Exception if the node is invalid
+     * @return string the generated code
+     */
+    protected function generatePartial(Node\Partial $node)
+    {
+        $out = '<?=$this->partial(';
+        if ($node->name instanceof Node\Literal)
+            $out .= $node->name->value;
+        else if ($node->name instanceof Node\Identifier)
+            $out .= '"'.$node->name->getName().'"';
+        else
+            throw new Exception("Expected literal or id, got ".get_class($node));
+
+        if (!empty($node->context)) {
+            $out .= ', '.$this->generateNode($node->context);
+        }
+        $out .= ')?>';
+        return $out;
+    }
+
+    /**
+     * Generates the code for an expression node.
+     *
+     * @param Node\Expression $node the node to generate code for
+     *
+     * @return string the generated code
+     */
+    protected function generateExpression(Node\Expression $node)
+    {
+        if (count($node->params))
+            return $this->generateCallExpression($node);
+
+        if ($node->subject instanceof Node\Data) {
+            $subject = $this->generateDataIdentifier($node->subject);
+            if (!$node->unescaped)
+                $out = $this->wrapEncode($subject);
+            else
+                $out = $subject;
+            return '<?='.$out.'?>';
+        }
+        else {
+            $subject = $this->generateIdentifier($node->subject);
+            $out = '<?=(isset('.$subject.') ? ';
+        }
+        if (!$node->unescaped)
+            $out .= $this->wrapEncode($subject);
+        else
+            $out .= $subject;
+
+        $out .= ' : \'\')?>';
+        return $out;
+    }
+
+    /**
+     * Generates the code for a call expression node.
+     *
+     * @param Node\Expression $node the node to generate code for
+     *
+     * @return string the generated code
+     */
+    protected function generateCallExpression(Node\Expression $node)
+    {
+        $subject = $this->generateIdentifier($node->subject, true);
+        $params = array_map(array($this, "generateNode"), $node->params);
+        $out = $subject.'('.implode(', ', $params).')';
+        if (!$node->unescaped)
+            $out = $this->wrapEncode($out);
+        return '<?='.$out.'?>';
+    }
+
+    /**
+     * Generates the code for a hash node.
+     *
+     * @param Node\Hash $node the node to generate code for
+     *
+     * @return string the generated code
+     */
+    protected function generateHash(Node\Hash $node)
+    {
+        $out = 'array(';
+        $out .= implode(', ', array_map(array($this, 'generateProperty'), $node->properties));
+        $out .= ')';
+        return $out;
+    }
+
+    /**
+     * Generates the code for a property node.
+     *
+     * @param Node\Property $node the node to generate code for
+     *
+     * @return string the generated code
+     */
+    protected function generateProperty(Node\Property $node)
+    {
+       return '"'.$node->key->getName().'" => '.$this->generateNode($node->value);
+    }
+
+
+    /**
+     * Generates the code for a literal node.
+     *
+     * @param Node\Literal $node the node to generate code for
+     *
+     * @return string the generated code
+     */
+    protected function generateLiteral(Node\Literal $node)
+    {
+        return $node->value;
+    }
+
+
+    /**
+     * Generates the code for an identifier node.
+     *
+     * @param Node\Identifier $node the node to generate code for
+     * @param bool $isHelper whether or not this is a helper
+     *
+     * @return string the generated code
+     */
+    protected function generateIdentifier(Node\Identifier $node, $isHelper = false)
+    {
+        if ($node instanceof Node\Data)
+            return $this->generateDataIdentifier($node);
+        $out = array();
+        if ($isHelper) {
+            $out[] = $this->helperScopePrefix;
+        }
+        $hasContext = false;
+        foreach($node->resolve() as $part) {
+            if ($part instanceof Token) {
+                if ($part->type === Token::ID) {
+                    if (!empty($part->options['quoted']))
+                        $out[] = '["'.$part->value.'"]';
+                    else if (!$hasContext) {
+                        $hasContext = true;
+                        $out[] = $part->value;
+                    }
+                    else
+                        $out[] = '->'.$part->value;
+                }
+                else if ($part->type === Token::INTEGER)
+                    $out[] = '['.$part->value.']';
+                else
+                    $out[] = '['.$part->value.']';
+            }
+            else if (!$hasContext) {
+                $out[] = $part;
+                $hasContext = true;
+            }
+            else
+                $out[] = '->'.$part;
+
+        }
+
+        if ($isHelper)
+            return implode('', $out);
+        else
+            return '$'.implode('', $out);
+    }
+
+    /**
+     * Generates the code for a data identifier node.
+     *
+     * @param \Handlebars\Node\Data $node the node to generate code for
+     *
+     * @return string the generated code
+     */
+    protected function generateDataIdentifier(Node\Data $node)
+    {
+        return '$'.$node->getFrame()->getIteratorName();
     }
 
     /**
@@ -40,302 +428,5 @@ class CodeGenerator
     protected function wrapEncode($code)
     {
         return '$this->encode('.$code.')';
-    }
-
-    /**
-     * Generate the source code for the given token
-     *
-     * @param object $token the token to generate code for
-     *
-     * @return string the generated code
-     */
-    protected function generateToken($token)
-    {
-        if (is_string($token)) {
-            return $token;
-        }
-        $methodName = 'generate'.$token->type;
-        if (method_exists($this, $methodName))
-            return $this->{$methodName}($token);
-        else
-            return '';
-    }
-
-    /**
-     * Generate the source code for the given `comment` token
-     *
-     * @param object $token the token to generate code for
-     *
-     * @return string the generated code
-     */
-    protected function generateComment($token)
-    {
-        $lines = array(
-            '<?php',
-            '/**'
-        );
-        foreach(preg_split("/(\r\n|\n\r|\r|\n)/", trim($token->value)) as $line) {
-            $line = trim($line);
-            if ($line === '')
-                continue;
-            $lines[] = ' * '.$line;
-        }
-        $lines[] = ' */';
-        $lines[] = '?>';
-        return implode("\n", $lines);
-
-    }
-
-    /**
-     * Generate the source code for the given `block` token
-     *
-     * @param object $token the token to generate code for
-     *
-     * @return string the generated code
-     */
-    protected function generateBlock($token)
-    {
-        $methodName = 'generate'.$token->start->subject->name.'Block';
-        if (method_exists($this, $methodName))
-            return $this->{$methodName}($token);
-        else
-            return $this->generateCustomBlock($token);
-    }
-
-    /**
-     * Generate the source code for the given `partial` token
-     *
-     * @param object $token the token to generate code for
-     *
-     * @return string the generated code
-     */
-    protected function generatePartial($token)
-    {
-        if ($token->context === null)
-            $context = '$'.$token->scopeName;
-        else
-            $context = $this->generateIdentifier($token->context);
-        return "<?php \$this->partial('{$token->name}', {$context}); ?>";
-    }
-
-    /**
-     * Generate the source code for the given `if` block token
-     *
-     * @param object $token the token to generate code for
-     *
-     * @return string the generated code
-     */
-    protected function generateIfBlock($token)
-    {
-        $out = array();
-        $out[] = "<?php if(!empty(".$this->generateIdentifier($token->start->params[0]).")): ?>";
-        $out[] = $this->generate($token);
-        $out[] = "<?php endif; ?>";
-        return implode('', $out);
-    }
-
-    /**
-     * Generate the source code for the given `unless` block token
-     *
-     * @param object $token the token to generate code for
-     *
-     * @return string the generated code
-     */
-    protected function generateUnlessBlock($token)
-    {
-        $out = array();
-        $out[] = "<?php if(empty(".$this->generateIdentifier($token->start->params[0]).")): ?>";
-        $out[] = $this->generate($token);
-        $out[] = "<?php endif; ?>";
-        return implode('', $out);
-    }
-
-    /**
-     * Generate the source code for the given `each` block token
-     *
-     * @param object $token the token to generate code for
-     *
-     * @return string the generated code
-     */
-    protected function generateEachBlock($token)
-    {
-        $out = array();
-        if (isset($token->start->params[0]))
-            $identifier = $this->generateIdentifier($token->start->params[0]);
-        else
-            $identifier = '$this';
-        $out[] = "<?php if (isset(".$identifier.")): foreach(".$identifier." as \${$token->iteratorKey} => \${$token->iteratorName}): ?>";
-        $out[] = $this->generate($token);
-        $out[] = "<?php endforeach; endif; ?>";
-        return implode('', $out);
-    }
-
-    /**
-     * Generate the source code for the given `with` block token
-     *
-     * @param object $token the token to generate code for
-     *
-     * @return string the generated code
-     */
-    protected function generateWithBlock($token)
-    {
-        $out = array();
-        if (isset($token->start->params[0]))
-            $identifier = $this->generateIdentifier($token->start->params[0]);
-        else
-            $identifier = '$this';
-        $out[] = "<?php if (isset(".$identifier.")): \${$token->iteratorName} = $identifier;?>";
-        $out[] = $this->generate($token);
-        $out[] = "<?php endif; ?>";
-        return implode('', $out);
-    }
-
-    /**
-     * Generate the source code for the given custom block token
-     *
-     * @param object $token the token to generate code for
-     *
-     * @return string the generated code
-     */
-    protected function generateCustomBlock($token)
-    {
-        $out = array();
-        $params = array();
-        foreach($token->start->params as $param)
-            $params[] = $this->generateToken($param);
-        $params[] = 'ob_get_clean()';
-        $out[] = '<?php ob_start(); ?>';
-        $out[] = $this->generate($token);
-        $out[] = "<?=\$this->{$token->start->subject->name}(".implode(', ', $params).")?>";
-        return implode('', $out);
-    }
-
-    /**
-     * Generate the source code for the given `else` token
-     *
-     * @param object $token the token to generate code for
-     *
-     * @return string the generated code
-     */
-    protected function generateElseExpression($token)
-    {
-        return "<?php else: ?>";
-    }
-
-    /**
-     * Generate the source code for the given `identifier` token
-     *
-     * @param object $token the token to generate code for
-     *
-     * @return string the generated code
-     */
-    protected function generateIdentifier($token)
-    {
-        if ($token->type == "parentAccessor")
-            $out = array('$'.$token->name);
-        elseif ($token->name == "this")
-            $out = array('$'.$token->scopeName);
-        elseif ($token->name == '$')
-            $out = array('$this');
-        elseif (!empty($token->scopeName))
-            $out = array('$'.$token->scopeName.'->'.$token->name);
-        else
-            $out = array('$'.$token->name);
-        foreach($token->accessors as $accessor) {
-            if ($accessor->type == 'integer')
-                $out[] = '['.$accessor->value.']';
-            else
-                $out[] = '->'.$accessor->name;
-        }
-        return implode('', $out);
-    }
-
-    /**
-     * Generate the source code for the given `expression` token
-     *
-     * @param object $token the token to generate code for
-     *
-     * @return string the generated code
-     */
-    protected function generateExpression($token)
-    {
-        if (count($token->params))
-            return $this->generateCallExpression($token);
-        else if ($token->subject->name == "else")
-            return $this->generateElseExpression($token);
-        else if ($token->raw) {
-            $c = $this->generateIdentifier($token->subject);
-            return "<?=empty($c) ? '' : $c ?>";
-        }
-        else {
-            $c = $this->generateIdentifier($token->subject);
-            return "<?=empty($c) ? '' : ".$this->wrapEncode($c)."?>";
-        }
-
-    }
-
-    /**
-     * Generate the source code for the given `reference` token
-     *
-     * @param object $token the token to generate code for
-     *
-     * @return string the generated code
-     */
-    protected function generateReference($token)
-    {
-        if ($token->raw) {
-            return "<?=\${$token->scopeKey}?>";
-        }
-        else {
-            return "<?=".$this->wrapEncode("\${$token->scopeKey}")."?>";
-        }
-    }
-
-    /**
-     * Generate the source code for the given `integer` token
-     *
-     * @param object $token the token to generate code for
-     *
-     * @return string the generated code
-     */
-    protected function generateInteger($token)
-    {
-        return $token->value;
-    }
-
-    /**
-     * Generate the source code for the given `string` token
-     *
-     * @param object $token the token to generate code for
-     *
-     * @return string the generated code
-     */
-    protected function generateString($token)
-    {
-        return $token->delimiter.$token->value.$token->delimiter;
-    }
-
-    /**
-     * Generate the source code for the given `call` token
-     *
-     * @param object $token the token to generate code for
-     *
-     * @return string the generated code
-     */
-    protected function generateCallExpression($token)
-    {
-        $params = array();
-        foreach($token->params as $param) {
-            $params[] = $this->generateToken($param);
-        }
-        $tempScope = $token->subject->scopeName;
-        $token->subject->scopeName = 'this';
-        $subject = $this->generateIdentifier($token->subject);
-        $token->subject->scopeName = $tempScope;
-        $code = $subject.'('.implode(', ', $params).')';
-        if (!empty($token->raw))
-            return '<?='.$code.'?>';
-        else
-            return '<?='.$this->wrapEncode($code).'?>';
     }
 }
